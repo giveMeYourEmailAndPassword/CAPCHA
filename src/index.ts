@@ -89,7 +89,20 @@ async function getTurnstileSolution(
 async function main() {
   const browser = await chromium.launch({
     headless: false,
-    slowMo: 1000,
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
+      "--window-size=1920,1080",
+      "--start-maximized",
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-infobars",
+      "--disable-dev-shm-usage",
+      "--disable-browser-side-navigation",
+      "--disable-gpu",
+      "--ignore-certificate-errors",
+      "--enable-features=NetworkService",
+    ],
   });
 
   let page;
@@ -98,34 +111,57 @@ async function main() {
     const context = await browser.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      viewport: { width: 1920, height: 1080 },
+      locale: "ru-RU",
+      timezoneId: "Asia/Almaty",
+      geolocation: { longitude: 76.9286, latitude: 43.2567 }, // Координаты Алматы
+      permissions: ["geolocation"],
+      // Эмулируем реальный браузер
+      deviceScaleFactor: 1,
+      hasTouch: false,
+      isMobile: false,
+      javaScriptEnabled: true,
+      acceptDownloads: true,
+    });
+
+    // Добавляем эмуляцию плагинов и других свойств браузера
+    await context.addInitScript(() => {
+      // Скрываем следы автоматизации
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      Object.defineProperty(navigator, "plugins", {
+        get: () => [
+          { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer" },
+          {
+            name: "Chrome PDF Viewer",
+            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+          },
+          { name: "Native Client", filename: "internal-nacl-plugin" },
+        ],
+      });
+
+      // Добавляем фейковые языки
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["ru-RU", "ru", "en-US", "en"],
+      });
+
+      // Эмулируем WebGL
+      const getParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) {
+          return "Intel Inc.";
+        }
+        if (parameter === 37446) {
+          return "Intel(R) UHD Graphics";
+        }
+        return getParameter.apply(this, [parameter]);
+      };
     });
 
     page = await context.newPage();
 
-    // Добавляем скрипт для перехвата параметров Turnstile с правильной типизацией
-    await page.addInitScript(() => {
-      const i = setInterval(() => {
-        if (window.turnstile) {
-          clearInterval(i);
-          window.turnstile.render = (
-            _containerId: string,
-            options: TurnstileOptions
-          ) => {
-            let p = {
-              type: "TurnstileTaskProxyless",
-              websiteKey: options.sitekey,
-              websiteURL: window.location.href,
-              data: options.cData,
-              pagedata: options.chlPageData,
-              action: options.action,
-              userAgent: navigator.userAgent,
-            };
-            console.log("Turnstile params:", JSON.stringify(p));
-            window.tsCallback = options.callback;
-            return "foo";
-          };
-        }
-      }, 10);
+    // Добавляем случайные движения мыши
+    await page.mouse.move(Math.random() * 1920, Math.random() * 1080, {
+      steps: 50,
     });
 
     console.log("Открываем страницу...");
@@ -134,112 +170,170 @@ async function main() {
       timeout: 60000,
     });
 
-    console.log("Ждем загрузки страницы...");
+    // Ждем полной загрузки страницы
     await page.waitForLoadState("domcontentloaded");
     await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(3000);
 
-    // Ждем появления и нажимаем кнопку принятия cookie
-    console.log("Ищем кнопку принятия cookie...");
+    // Принимаем куки
     try {
-      await page.waitForSelector("#onetrust-accept-btn-handler", {
-        state: "visible",
-        timeout: 30000,
+      const cookieButton = await page.getByRole("button", {
+        name: "Согласиться с использованием всех файлов cookie",
       });
-      console.log("Кнопка cookie найдена, пытаемся нажать...");
-
-      // Пробуем разные способы нажатия
-      try {
-        await page.click("#onetrust-accept-btn-handler", { force: true });
-      } catch {
-        await page.evaluate(() => {
-          const button = document.querySelector(
-            "#onetrust-accept-btn-handler"
-          ) as HTMLElement;
-          if (button) button.click();
-        });
+      if (cookieButton) {
+        await cookieButton.hover();
+        await page.waitForTimeout(500);
+        await cookieButton.click();
+        await page.waitForTimeout(2000);
       }
-
-      console.log("Куки приняты");
-      await page.waitForTimeout(5000);
     } catch (e) {
-      console.log("Проблема с кнопкой cookie:", e);
+      console.log("Не удалось найти кнопку принятия cookie");
     }
 
-    // Проверяем наличие полей ввода и их состояние
-    console.log("Проверяем поля ввода...");
+    // Пытаемся найти и заполнить поля формы
     try {
-      await page.waitForSelector("#username", {
-        state: "visible",
-        timeout: 30000,
-      });
-      console.log("Поле username найдено");
+      console.log("Ищем поля формы...");
 
-      await page.waitForSelector("#password", {
-        state: "visible",
-        timeout: 30000,
-      });
-      console.log("Поле password найдено");
+      // Ждем появления формы
+      await page.waitForTimeout(5000);
 
-      // Пробуем заполнить поля с задержкой
-      await page.waitForTimeout(2000);
-      await page.type("#username", config.email, { delay: 100 });
-      console.log("Email введен");
+      // Пробуем разные селекторы для email
+      const emailSelectors = [
+        'input[formcontrolname="username"]',
+        'input[type="email"]',
+        'input[type="text"]',
+        "#username",
+        '[name="username"]',
+        ".mat-input-element",
+      ];
 
-      await page.waitForTimeout(1000);
-      await page.type("#password", config.password, { delay: 100 });
-      console.log("Пароль введен");
-    } catch (e) {
-      console.log("Проблема с полями ввода:", e);
-
-      // Выводим все найденные элементы на странице для отладки
-      const elements = await page.evaluate(() => {
-        return {
-          usernameExists: !!document.querySelector("#username"),
-          passwordExists: !!document.querySelector("#password"),
-          html: document.documentElement.innerHTML,
-        };
-      });
-      console.log("Состояние элементов на странице:", elements);
-    }
-
-    // Делаем скриншот для отладки
-    await page.screenshot({ path: "debug.png", fullPage: true });
-
-    // Ищем Turnstile элемент
-    const turnstileElement = await page
-      .locator('iframe[src*="challenges.cloudflare.com"]')
-      .first();
-    if (turnstileElement) {
-      const siteKey = await turnstileElement.getAttribute("data-sitekey");
-      if (siteKey) {
-        console.log("Found Turnstile sitekey:", siteKey);
-
-        const token = await getTurnstileSolution(
-          config.captchaApiKey,
-          siteKey,
-          page.url()
-        );
-
-        if (token) {
-          // Вставляем токен и вызываем callback
-          await page.evaluate((token) => {
-            const input = document.querySelector(
-              'input[name="cf-turnstile-response"]'
-            );
-            if (input) {
-              (input as HTMLInputElement).value = token;
-              input.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-            if (window.tsCallback) {
-              window.tsCallback(token);
-            }
-          }, token);
+      let emailInput = null;
+      for (const selector of emailSelectors) {
+        try {
+          emailInput = await page.waitForSelector(selector, {
+            timeout: 5000,
+            state: "visible",
+          });
+          if (emailInput) {
+            console.log(`Найдено поле email по селектору: ${selector}`);
+            break;
+          }
+        } catch (e) {
+          console.log(`Не найдено поле email по селектору: ${selector}`);
         }
       }
+
+      if (emailInput) {
+        // Эмулируем человеческое поведение
+        await page.mouse.move(
+          Math.random() * 100 + 200,
+          Math.random() * 100 + 200
+        );
+        await page.waitForTimeout(500);
+
+        // Пробуем разные способы ввода
+        try {
+          await emailInput.click({ force: true });
+          await page.waitForTimeout(500);
+          await emailInput.fill(config.email);
+        } catch {
+          await page.evaluate((email) => {
+            const input = document.querySelector(
+              'input[formcontrolname="username"]'
+            ) as HTMLInputElement;
+            if (input) {
+              input.value = email;
+              input.dispatchEvent(new Event("input", { bubbles: true }));
+              input.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+          }, config.email);
+        }
+
+        console.log("Email введен");
+      }
+
+      await page.waitForTimeout(2000);
+
+      // Пробуем разные селекторы для пароля
+      const passwordSelectors = [
+        'input[formcontrolname="password"]',
+        'input[type="password"]',
+        "#password",
+        '[name="password"]',
+      ];
+
+      let passwordInput = null;
+      for (const selector of passwordSelectors) {
+        try {
+          passwordInput = await page.waitForSelector(selector, {
+            timeout: 5000,
+            state: "visible",
+          });
+          if (passwordInput) {
+            console.log(`Найдено поле пароля по селектору: ${selector}`);
+            break;
+          }
+        } catch (e) {
+          console.log(`Не найдено поле пароля по селектору: ${selector}`);
+        }
+      }
+
+      if (passwordInput) {
+        // Эмулируем человеческое поведение
+        await page.mouse.move(
+          Math.random() * 100 + 200,
+          Math.random() * 100 + 300
+        );
+        await page.waitForTimeout(500);
+
+        // Пробуем разные способы ввода
+        try {
+          await passwordInput.click({ force: true });
+          await page.waitForTimeout(500);
+          await passwordInput.fill(config.password);
+        } catch {
+          await page.evaluate((password) => {
+            const input = document.querySelector(
+              'input[formcontrolname="password"]'
+            ) as HTMLInputElement;
+            if (input) {
+              input.value = password;
+              input.dispatchEvent(new Event("input", { bubbles: true }));
+              input.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+          }, config.password);
+        }
+
+        console.log("Пароль введен");
+      }
+
+      // Делаем скриншот для проверки
+      await page.screenshot({ path: "form-filled.png", fullPage: true });
+
+      // Выводим состояние формы
+      const formState = await page.evaluate(() => {
+        const emailInput = document.querySelector(
+          'input[formcontrolname="username"]'
+        ) as HTMLInputElement;
+        const passwordInput = document.querySelector(
+          'input[formcontrolname="password"]'
+        ) as HTMLInputElement;
+        return {
+          emailValue: emailInput?.value || "не найдено",
+          passwordValue: passwordInput?.value ? "***" : "не найдено",
+          emailVisible: emailInput?.offsetParent !== null,
+          passwordVisible: passwordInput?.offsetParent !== null,
+        };
+      });
+
+      console.log("Состояние формы:", formState);
+    } catch (e) {
+      console.log("Ошибка при заполнении формы:", e);
+      await page.screenshot({ path: "form-error.png", fullPage: true });
     }
 
     // Ждем перед закрытием
-    await page.waitForTimeout(100000);
+    await page.waitForTimeout(30000);
   } catch (error) {
     console.error("Произошла ошибка:", error);
     if (page) {
