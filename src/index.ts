@@ -94,14 +94,6 @@ async function main() {
       "--disable-features=IsolateOrigins,site-per-process",
       "--window-size=1920,1080",
       "--start-maximized",
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-infobars",
-      "--disable-dev-shm-usage",
-      "--disable-browser-side-navigation",
-      "--disable-gpu",
-      "--ignore-certificate-errors",
-      "--enable-features=NetworkService",
     ],
   });
 
@@ -114,19 +106,12 @@ async function main() {
       viewport: { width: 1920, height: 1080 },
       locale: "ru-RU",
       timezoneId: "Asia/Almaty",
-      geolocation: { longitude: 76.9286, latitude: 43.2567 }, // Координаты Алматы
+      geolocation: { longitude: 76.9286, latitude: 43.2567 },
       permissions: ["geolocation"],
-      // Эмулируем реальный браузер
-      deviceScaleFactor: 1,
-      hasTouch: false,
-      isMobile: false,
-      javaScriptEnabled: true,
-      acceptDownloads: true,
     });
 
     // Добавляем эмуляцию плагинов и других свойств браузера
     await context.addInitScript(() => {
-      // Скрываем следы автоматизации
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       Object.defineProperty(navigator, "plugins", {
         get: () => [
@@ -138,31 +123,9 @@ async function main() {
           { name: "Native Client", filename: "internal-nacl-plugin" },
         ],
       });
-
-      // Добавляем фейковые языки
-      Object.defineProperty(navigator, "languages", {
-        get: () => ["ru-RU", "ru", "en-US", "en"],
-      });
-
-      // Эмулируем WebGL
-      const getParameter = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = function (parameter) {
-        if (parameter === 37445) {
-          return "Intel Inc.";
-        }
-        if (parameter === 37446) {
-          return "Intel(R) UHD Graphics";
-        }
-        return getParameter.apply(this, [parameter]);
-      };
     });
 
     page = await context.newPage();
-
-    // Добавляем случайные движения мыши
-    await page.mouse.move(Math.random() * 1920, Math.random() * 1080, {
-      steps: 50,
-    });
 
     console.log("Открываем страницу...");
     await page.goto("https://visa.vfsglobal.com/kaz/ru/bgr/login", {
@@ -170,147 +133,72 @@ async function main() {
       timeout: 60000,
     });
 
-    // Ждем полной загрузки страницы
     await page.waitForLoadState("domcontentloaded");
     await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(5000);
 
-    // Принимаем куки
+    // Принимаем куки если они есть
     try {
-      const cookieButton = await page.getByRole("button", {
-        name: "Согласиться с использованием всех файлов cookie",
-      });
-      if (cookieButton) {
-        await cookieButton.hover();
-        await page.waitForTimeout(500);
-        await cookieButton.click();
-        await page.waitForTimeout(2000);
-      }
+      await page.click("#onetrust-accept-btn-handler");
+      await page.waitForTimeout(2000);
     } catch (e) {
-      console.log("Не удалось найти кнопку принятия cookie");
+      console.log("Кнопка куки не найдена");
     }
 
-    // Пытаемся найти и заполнить поля формы
+    // Ищем и заполняем email
     try {
-      console.log("Ищем поля формы...");
+      console.log("Ищем поле email...");
 
-      // Ждем появления формы
-      await page.waitForTimeout(5000);
+      // Ждем появления поля
+      await page.waitForSelector('input[formcontrolname="username"]', {
+        state: "visible",
+        timeout: 10000,
+      });
 
-      // Пробуем разные селекторы для email
-      const emailSelectors = [
-        'input[formcontrolname="username"]',
-        'input[type="email"]',
-        'input[type="text"]',
-        "#username",
-        '[name="username"]',
-        ".mat-input-element",
-      ];
-
-      let emailInput = null;
-      for (const selector of emailSelectors) {
-        try {
-          emailInput = await page.waitForSelector(selector, {
-            timeout: 5000,
-            state: "visible",
-          });
-          if (emailInput) {
-            console.log(`Найдено поле email по селектору: ${selector}`);
-            break;
-          }
-        } catch (e) {
-          console.log(`Не найдено поле email по селектору: ${selector}`);
-        }
-      }
-
-      if (emailInput) {
-        // Эмулируем человеческое поведение
-        await page.mouse.move(
-          Math.random() * 100 + 200,
-          Math.random() * 100 + 200
+      // Заполняем email через evaluate
+      await page.evaluate((email: string) => {
+        const inputs = document.querySelectorAll(
+          'input[formcontrolname="username"]'
         );
-        await page.waitForTimeout(500);
+        inputs.forEach((input: Element) => {
+          if (
+            (input as HTMLInputElement)
+              .getAttribute("placeholder")
+              ?.includes("email")
+          ) {
+            (input as HTMLInputElement).value = email;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            input.dispatchEvent(new Event("blur", { bubbles: true }));
+          }
+        });
+      }, config.email);
 
-        // Пробуем разные способы ввода
-        try {
-          await emailInput.click({ force: true });
-          await page.waitForTimeout(500);
-          await emailInput.fill(config.email);
-        } catch {
-          await page.evaluate((email) => {
-            const input = document.querySelector(
-              'input[formcontrolname="username"]'
-            ) as HTMLInputElement;
-            if (input) {
-              input.value = email;
-              input.dispatchEvent(new Event("input", { bubbles: true }));
-              input.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-          }, config.email);
-        }
-
-        console.log("Email введен");
-      }
-
+      console.log("Email введен");
       await page.waitForTimeout(2000);
 
-      // Пробуем разные селекторы для пароля
-      const passwordSelectors = [
-        'input[formcontrolname="password"]',
-        'input[type="password"]',
-        "#password",
-        '[name="password"]',
-      ];
+      // Ищем и заполняем пароль
+      console.log("Ищем поле пароля...");
+      await page.waitForSelector('input[formcontrolname="password"]', {
+        state: "visible",
+        timeout: 10000,
+      });
 
-      let passwordInput = null;
-      for (const selector of passwordSelectors) {
-        try {
-          passwordInput = await page.waitForSelector(selector, {
-            timeout: 5000,
-            state: "visible",
-          });
-          if (passwordInput) {
-            console.log(`Найдено поле пароля по селектору: ${selector}`);
-            break;
-          }
-        } catch (e) {
-          console.log(`Не найдено поле пароля по селектору: ${selector}`);
+      await page.evaluate((password: string) => {
+        const input = document.querySelector(
+          'input[formcontrolname="password"]'
+        ) as HTMLInputElement;
+        if (input) {
+          input.value = password;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          input.dispatchEvent(new Event("blur", { bubbles: true }));
         }
-      }
+      }, config.password);
 
-      if (passwordInput) {
-        // Эмулируем человеческое поведение
-        await page.mouse.move(
-          Math.random() * 100 + 200,
-          Math.random() * 100 + 300
-        );
-        await page.waitForTimeout(500);
+      console.log("Пароль введен");
 
-        // Пробуем разные способы ввода
-        try {
-          await passwordInput.click({ force: true });
-          await page.waitForTimeout(500);
-          await passwordInput.fill(config.password);
-        } catch {
-          await page.evaluate((password) => {
-            const input = document.querySelector(
-              'input[formcontrolname="password"]'
-            ) as HTMLInputElement;
-            if (input) {
-              input.value = password;
-              input.dispatchEvent(new Event("input", { bubbles: true }));
-              input.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-          }, config.password);
-        }
-
-        console.log("Пароль введен");
-      }
-
-      // Делаем скриншот для проверки
-      await page.screenshot({ path: "form-filled.png", fullPage: true });
-
-      // Выводим состояние формы
+      // Проверяем состояние формы
       const formState = await page.evaluate(() => {
         const emailInput = document.querySelector(
           'input[formcontrolname="username"]'
@@ -319,17 +207,18 @@ async function main() {
           'input[formcontrolname="password"]'
         ) as HTMLInputElement;
         return {
-          emailValue: emailInput?.value || "не найдено",
-          passwordValue: passwordInput?.value ? "***" : "не найдено",
-          emailVisible: emailInput?.offsetParent !== null,
-          passwordVisible: passwordInput?.offsetParent !== null,
+          email: emailInput ? emailInput.value : "не найдено",
+          hasPassword: passwordInput ? !!passwordInput.value : false,
         };
       });
 
       console.log("Состояние формы:", formState);
+
+      // Делаем скриншот заполненной формы
+      await page.screenshot({ path: "filled-form.png", fullPage: true });
     } catch (e) {
-      console.log("Ошибка при заполнении формы:", e);
-      await page.screenshot({ path: "form-error.png", fullPage: true });
+      console.error("Ошибка при заполнении формы:", e);
+      await page.screenshot({ path: "form-error.png" });
     }
 
     // Ждем перед закрытием
@@ -337,7 +226,7 @@ async function main() {
   } catch (error) {
     console.error("Произошла ошибка:", error);
     if (page) {
-      await page.screenshot({ path: "error.png", fullPage: true });
+      await page.screenshot({ path: "error.png" });
     }
   } finally {
     if (browser) {
