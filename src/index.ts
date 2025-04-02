@@ -1,10 +1,74 @@
-import { chromium } from "playwright";
+import { chromium, Page } from "playwright";
 import { config } from "./config";
+
+async function getTurnstileSolution(
+  apiKey: string,
+  siteKey: string,
+  pageUrl: string
+): Promise<string | null> {
+  const inUrl = "http://2captcha.com/in.php";
+  const payload = {
+    key: apiKey,
+    method: "turnstile",
+    sitekey: siteKey,
+    pageurl: pageUrl,
+    json: 1,
+  };
+
+  try {
+    const response = await fetch(inUrl, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    const result = await response.json();
+
+    if (result.status !== 1) {
+      console.log("Error submitting task:", result.request);
+      return null;
+    }
+
+    const captchaId = result.request;
+    console.log("CAPTCHA solving task submitted, ID:", captchaId);
+
+    // Опрашиваем результат каждые 5 секунд
+    const resUrl = "http://2captcha.com/res.php";
+    const params = new URLSearchParams({
+      key: apiKey,
+      action: "get",
+      id: captchaId,
+      json: "1",
+    });
+
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      const resResponse = await fetch(`${resUrl}?${params}`);
+      const resResult = await resResponse.json();
+
+      if (resResult.status === 1) {
+        console.log("CAPTCHA solution received:", resResult.request);
+        return resResult.request;
+      } else if (resResult.request === "CAPCHA_NOT_READY") {
+        console.log("Solution not ready yet, retrying...");
+        continue;
+      } else {
+        console.log("Error retrieving solution:", resResult.request);
+        return null;
+      }
+    }
+  } catch (error) {
+    console.error("Error while solving CAPTCHA:", error);
+    return null;
+  }
+}
 
 async function main() {
   const browser = await chromium.launch({
     headless: false,
-    slowMo: 500, // Увеличиваем задержку между действиями
+    slowMo: 500,
   });
 
   try {
@@ -15,51 +79,54 @@ async function main() {
 
     const page = await context.newPage();
 
-    // Переходим на страницу логина
     console.log("Открываем страницу...");
     await page.goto("https://visa.vfsglobal.com/kaz/ru/bgr/login");
 
-    // Ждем загрузки страницы
     console.log("Ждем загрузки страницы...");
     await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(5000); // Ждем 5 секунд
+    await page.waitForTimeout(5000);
 
-    // Пробуем найти и заполнить поля
-    console.log("Пробуем заполнить поля...");
+    // Ищем Turnstile элемент и получаем sitekey
+    const turnstileElement = await page
+      .locator('iframe[src*="challenges.cloudflare.com"]')
+      .first();
+    if (turnstileElement) {
+      const siteKey = await turnstileElement.getAttribute("data-sitekey");
+      if (siteKey) {
+        console.log("Found Turnstile sitekey:", siteKey);
 
-    // Пробуем разные селекторы для поля email
-    try {
-      await page.waitForSelector('input[type="email"]', { timeout: 10000 });
-      await page.type('input[type="email"]', config.email, { delay: 100 });
-    } catch {
-      try {
-        await page.waitForSelector("#mat-input-0", { timeout: 10000 });
-        await page.type("#mat-input-0", config.email, { delay: 100 });
-      } catch (e) {
-        console.log("Не удалось найти поле email");
+        // Получаем решение от 2captcha
+        const token = await getTurnstileSolution(
+          config.captchaApiKey,
+          siteKey,
+          page.url()
+        );
+
+        if (token) {
+          // Вставляем токен в скрытое поле
+          await page.evaluate((token) => {
+            const input = document.querySelector(
+              'input[name="cf-turnstile-response"]'
+            );
+            if (input) {
+              (input as HTMLInputElement).value = token;
+              input.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+          }, token);
+        }
       }
     }
 
-    // Ждем немного перед заполнением пароля
-    await page.waitForTimeout(2000);
+    // Заполняем поля логина и пароля
+    await page.waitForSelector("#username");
+    await page.fill("#username", config.email);
+    await page.waitForTimeout(1000);
 
-    // Пробуем разные селекторы для поля пароля
-    try {
-      await page.waitForSelector('input[type="password"]', { timeout: 10000 });
-      await page.type('input[type="password"]', config.password, {
-        delay: 100,
-      });
-    } catch {
-      try {
-        await page.waitForSelector("#mat-input-1", { timeout: 10000 });
-        await page.type("#mat-input-1", config.password, { delay: 100 });
-      } catch (e) {
-        console.log("Не удалось найти поле пароля");
-      }
-    }
+    await page.waitForSelector("#password");
+    await page.fill("#password", config.password);
+    await page.waitForTimeout(1000);
 
-    // Ждем 10 секунд перед закрытием
-    console.log("Ждем 10 секунд...");
+    // Ждем перед закрытием
     await page.waitForTimeout(10000);
   } catch (error) {
     console.error("Произошла ошибка:", error);
